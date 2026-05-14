@@ -1,0 +1,474 @@
+<!doctype html>
+<!--
+  Browser test harness for the engine.
+
+  Open this file in a browser after running `npm run build`.
+  It loads the engine bundle, sends commands through the browser
+  postMessage adapter, and logs all events/responses to the page.
+
+  This file is NOT shipped to production — it's for manual testing
+  and debugging during development.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tiptap Engine — Browser Test</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      body {
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+        background: #1a1a2e;
+        color: #e0e0e0;
+        padding: 24px;
+      }
+
+      h1 {
+        font-size: 18px;
+        color: #7fdbca;
+        margin-bottom: 16px;
+      }
+
+      #log {
+        background: #0d0d1a;
+        border: 1px solid #333;
+        border-radius: 8px;
+        padding: 16px;
+        max-height: 70vh;
+        overflow-y: auto;
+        font-size: 13px;
+        line-height: 1.6;
+      }
+
+      .log-entry {
+        margin-bottom: 8px;
+      }
+      .log-label {
+        display: inline-block;
+        padding: 1px 6px;
+        border-radius: 3px;
+        font-size: 11px;
+        font-weight: 600;
+        margin-right: 6px;
+      }
+      .log-pass {
+        background: #2d6a4f;
+        color: #b7e4c7;
+      }
+      .log-fail {
+        background: #6a2d2d;
+        color: #e4b7b7;
+      }
+      .log-info {
+        background: #2d4a6a;
+        color: #b7d4e4;
+      }
+      .log-event {
+        background: #4a2d6a;
+        color: #d4b7e4;
+      }
+      .log-detail {
+        color: #888;
+        margin-left: 20px;
+        font-size: 12px;
+      }
+
+      #controls {
+        margin-bottom: 16px;
+        display: flex;
+        gap: 8px;
+      }
+
+      button {
+        background: #2d4a6a;
+        color: #e0e0e0;
+        border: 1px solid #446;
+        border-radius: 4px;
+        padding: 6px 14px;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      button:hover {
+        background: #3d5a7a;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Hidden div for ProseMirror to mount on -->
+    <div id="editor" style="display: none"></div>
+
+    <h1>Tiptap Engine — Browser Test Harness</h1>
+
+    <div id="controls">
+      <button onclick="runTests()">Run All Tests</button>
+      <button onclick="clearLog()">Clear Log</button>
+    </div>
+
+    <div id="log"></div>
+
+    <!-- Load the engine bundle -->
+    <script src="tiptap-engine.js"></script>
+
+    <script>
+      const logEl = document.getElementById("log");
+      let cmdCounter = 0;
+      let receivedMessages = [];
+
+      function clearLog() {
+        logEl.innerHTML = "";
+      }
+
+      function log(label, cssClass, text, detail) {
+        const entry = document.createElement("div");
+        entry.className = "log-entry";
+
+        const badge = document.createElement("span");
+        badge.className = "log-label " + cssClass;
+        badge.textContent = label;
+
+        entry.appendChild(badge);
+        entry.appendChild(document.createTextNode(text));
+
+        if (detail) {
+          const detailEl = document.createElement("div");
+          detailEl.className = "log-detail";
+          detailEl.textContent =
+            typeof detail === "string"
+              ? detail
+              : JSON.stringify(detail, null, 2);
+          entry.appendChild(detailEl);
+        }
+
+        logEl.appendChild(entry);
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      function logPass(text, detail) {
+        log("PASS", "log-pass", text, detail);
+      }
+      function logFail(text, detail) {
+        log("FAIL", "log-fail", text, detail);
+      }
+      function logInfo(text, detail) {
+        log("INFO", "log-info", text, detail);
+      }
+      function logEvent(text, detail) {
+        log("EVENT", "log-event", text, detail);
+      }
+
+      /**
+       * Listen for messages from the engine via the browser postMessage adapter.
+       */
+      window.addEventListener("message", function (event) {
+        if (event.data && event.data.source === "tiptap-engine") {
+          const msg = event.data.message;
+          receivedMessages.push(msg);
+          logEvent(msg.type + (msg.name ? ":" + msg.name : ""), truncate(msg));
+        }
+      });
+
+      function truncate(obj) {
+        const json = JSON.stringify(obj);
+        return json.length > 300 ? json.substring(0, 300) + "…" : json;
+      }
+
+      /**
+       * Send a command to the engine through the browser postMessage adapter.
+       * Returns a promise that resolves with the response.
+       */
+      function sendCommand(name, payload) {
+        return new Promise(function (resolve, reject) {
+          const id = "test_" + ++cmdCounter;
+          const command = {
+            type: "command",
+            id: id,
+            name: name,
+            payload: payload || {},
+          };
+
+          const timeout = setTimeout(function () {
+            reject(new Error("Timeout waiting for response to " + name));
+          }, 5000);
+
+          function handler(event) {
+            if (event.data && event.data.source === "tiptap-engine") {
+              const msg = event.data.message;
+              if (msg.type === "response" && msg.id === id) {
+                clearTimeout(timeout);
+                window.removeEventListener("message", handler);
+                resolve(msg);
+              }
+            }
+          }
+
+          window.addEventListener("message", handler);
+
+          window.postMessage({ source: "tiptap-port", message: command }, "*");
+        });
+      }
+
+      /**
+       * Wait for a specific event by name from the collected messages.
+       */
+      function findEvent(name) {
+        return receivedMessages.find(function (m) {
+          return m.type === "event" && m.name === name;
+        });
+      }
+
+      /**
+       * Find all events with a given name.
+       */
+      function findEvents(name) {
+        return receivedMessages.filter(function (m) {
+          return m.type === "event" && m.name === name;
+        });
+      }
+
+      /**
+       * Assertion helper.
+       */
+      function assert(condition, testName, detail) {
+        if (condition) {
+          logPass(testName);
+        } else {
+          logFail(testName, detail || "Assertion failed");
+        }
+      }
+
+      /**
+       * Run all tests sequentially.
+       */
+      async function runTests() {
+        clearLog();
+        receivedMessages = [];
+        cmdCounter = 0;
+
+        logInfo("Starting browser tests...");
+
+        // ---- Test 1: Init ----
+        try {
+          const initResp = await sendCommand("init", {
+            content: "<p>Hello <strong>world</strong>!</p>",
+          });
+
+          assert(initResp.success, "init returns success");
+
+          const schemaReady = findEvent("schemaReady");
+          assert(schemaReady != null, "schemaReady event received");
+
+          if (schemaReady) {
+            const nodeNames = schemaReady.payload.nodes.map(function (n) {
+              return n.name;
+            });
+            assert(
+              nodeNames.indexOf("paragraph") !== -1,
+              "schema includes paragraph node"
+            );
+            assert(
+              nodeNames.indexOf("heading") !== -1,
+              "schema includes heading node"
+            );
+
+            const markNames = schemaReady.payload.marks.map(function (m) {
+              return m.name;
+            });
+            assert(
+              markNames.indexOf("bold") !== -1,
+              "schema includes bold mark"
+            );
+            assert(
+              markNames.indexOf("italic") !== -1,
+              "schema includes italic mark"
+            );
+
+            logInfo(
+              "Schema: " +
+                schemaReady.payload.nodes.length +
+                " nodes, " +
+                schemaReady.payload.marks.length +
+                " marks, " +
+                schemaReady.payload.commands.length +
+                " commands"
+            );
+          }
+
+          const ready = findEvent("ready");
+          assert(ready != null, "ready event received");
+
+          const stateChanged = findEvents("stateChanged");
+          assert(
+            stateChanged.length > 0,
+            "stateChanged event received after init"
+          );
+
+          if (stateChanged.length > 0) {
+            const state = stateChanged[stateChanged.length - 1].payload;
+            assert(state.doc.type === "doc", 'doc node is type "doc"');
+            assert(state.doc.pos === 0, "doc pos is 0");
+            assert(
+              state.doc.content && state.doc.content.length > 0,
+              "doc has content"
+            );
+
+            const para = state.doc.content[0];
+            assert(para.type === "paragraph", "first child is paragraph");
+            assert(typeof para.pos === "number", "paragraph has pos");
+            assert(typeof para.end === "number", "paragraph has end");
+            assert(para.end > para.pos, "paragraph end > pos");
+
+            assert(state.selection != null, "selection state present");
+            assert(state.editable === true, "editable is true");
+
+            logInfo(
+              "Document positions: doc(0, " +
+                state.doc.end +
+                ") → paragraph(" +
+                para.pos +
+                ", " +
+                para.end +
+                ")"
+            );
+          }
+        } catch (e) {
+          logFail("init test threw: " + e.message);
+        }
+
+        // ---- Test 2: getContent ----
+        try {
+          const jsonResp = await sendCommand("getContent", { format: "json" });
+          assert(jsonResp.success, "getContent(json) succeeds");
+          assert(
+            jsonResp.payload.content.type === "doc",
+            "JSON content is a doc"
+          );
+
+          const htmlResp = await sendCommand("getContent", { format: "html" });
+          assert(htmlResp.success, "getContent(html) succeeds");
+          assert(
+            typeof htmlResp.payload.content === "string",
+            "HTML content is a string"
+          );
+
+          const textResp = await sendCommand("getContent", { format: "text" });
+          assert(textResp.success, "getContent(text) succeeds");
+          assert(
+            textResp.payload.content.indexOf("Hello") !== -1,
+            'text content contains "Hello"'
+          );
+
+          logInfo('Text content: "' + textResp.payload.content + '"');
+        } catch (e) {
+          logFail("getContent test threw: " + e.message);
+        }
+
+        // ---- Test 3: exec toggleBold ----
+        try {
+          await sendCommand("selectAll");
+          const boldResp = await sendCommand("exec", { command: "toggleBold" });
+          assert(boldResp.success, "exec toggleBold succeeds");
+        } catch (e) {
+          logFail("exec test threw: " + e.message);
+        }
+
+        // ---- Test 4: setContent ----
+        try {
+          receivedMessages = [];
+          const setResp = await sendCommand("setContent", {
+            content: "<h1>New Heading</h1><p>New paragraph</p>",
+          });
+          assert(setResp.success, "setContent succeeds");
+
+          const contentChanged = findEvent("contentChanged");
+          assert(
+            contentChanged != null,
+            "contentChanged event received after setContent"
+          );
+        } catch (e) {
+          logFail("setContent test threw: " + e.message);
+        }
+
+        // ---- Test 5: Selection ----
+        try {
+          const selResp = await sendCommand("setTextSelection", {
+            anchor: 1,
+            head: 5,
+          });
+          assert(selResp.success, "setTextSelection succeeds");
+
+          const stateResp = await sendCommand("getState");
+          assert(stateResp.success, "getState succeeds");
+          assert(
+            stateResp.payload.selection.empty === false,
+            "selection is not empty after range select"
+          );
+
+          logInfo("Selection: " + JSON.stringify(stateResp.payload.selection));
+        } catch (e) {
+          logFail("selection test threw: " + e.message);
+        }
+
+        // ---- Test 6: isActive / canExec ----
+        try {
+          const activeResp = await sendCommand("isActive", { name: "heading" });
+          assert(activeResp.success, "isActive succeeds");
+          assert(
+            typeof activeResp.payload.active === "boolean",
+            "isActive returns boolean"
+          );
+
+          const canResp = await sendCommand("canExec", {
+            command: "toggleBold",
+          });
+          assert(canResp.success, "canExec succeeds");
+          assert(
+            typeof canResp.payload.canExec === "boolean",
+            "canExec returns boolean"
+          );
+        } catch (e) {
+          logFail("query test threw: " + e.message);
+        }
+
+        // ---- Test 7: Destroy and re-init ----
+        try {
+          const destroyResp = await sendCommand("destroy");
+          assert(destroyResp.success, "destroy succeeds");
+
+          const postDestroyResp = await sendCommand("getContent", {
+            format: "text",
+          });
+          assert(
+            postDestroyResp.success === false,
+            "commands fail after destroy"
+          );
+
+          receivedMessages = [];
+          const reinitResp = await sendCommand("init", {
+            content: "<p>Reinitialized</p>",
+          });
+          assert(reinitResp.success, "reinit succeeds");
+
+          const reinitReady = findEvent("ready");
+          assert(reinitReady != null, "ready event after reinit");
+        } catch (e) {
+          logFail("destroy/reinit test threw: " + e.message);
+        }
+
+        // ---- Cleanup ----
+        try {
+          await sendCommand("destroy");
+        } catch (e) {
+          /* ignore */
+        }
+
+        logInfo("All tests complete.");
+      }
+    </script>
+  </body>
+</html>
