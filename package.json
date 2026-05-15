@@ -2,6 +2,7 @@
   "name": "@tiptap-native/engine",
   "version": "0.1.0",
   "description": "Headless Tiptap runtime exposing a platform-agnostic message-based API for native ports",
+  "license": "MIT",
   "type": "module",
   "main": "dist/tiptap-engine.js",
   "scripts": {
