@@ -11,6 +11,11 @@
 
 import { Editor } from "@tiptap/core";
 import type { Transaction } from "@tiptap/pm/state";
+import {
+  joinBackward,
+  selectNodeBackward,
+  deleteSelection,
+} from "@tiptap/pm/commands";
 import type { BaseAdapter } from "../adapters/base";
 import {
   resolveExtensions,
@@ -122,9 +127,7 @@ function computeCommandStates(editor: Editor): Record<string, CommandState> {
  * Attempt to find the history plugin state in the editor. The history
  * plugin stores undo/redo stacks that we need for depth counts.
  */
-function findHistoryState(
-  editor: Editor
-): {
+function findHistoryState(editor: Editor): {
   done?: { items?: { length: number } };
   undone?: { items?: { length: number } };
 } | null {
@@ -217,6 +220,12 @@ export class TiptapEngine {
           break;
         case "blur":
           this.handleBlur(command);
+          break;
+        case "backspace":
+          this.handleBackspace(command);
+          break;
+        case "enter":
+          this.handleEnter(command);
           break;
         case "getState":
           this.handleGetState(command);
@@ -585,6 +594,79 @@ export class TiptapEngine {
   private handleBlur(command: Command): void {
     this.requireEditor(command.id, (editor) => {
       editor.commands.blur();
+      this.sendResponse(command.id, true);
+    });
+  }
+
+  // ==========================================================================
+  // Keyboard Action Commands
+  // ==========================================================================
+
+  /**
+   * Execute ProseMirror's Backspace command chain directly. We run the
+   * same sequence of commands that ProseMirror's keymap binds to the
+   * Backspace key, but we invoke them as ProseMirror commands rather
+   * than simulating a DOM KeyboardEvent via keyboardShortcut(). This
+   * is more reliable in headless/jsdom environments where synthetic
+   * keyboard events may not propagate through the full input pipeline.
+   *
+   * The chain tries each command in order until one succeeds:
+   *   1. deleteSelection — handles non-empty selections
+   *   2. joinBackward — merges with the previous block
+   *   3. selectNodeBackward — selects an atomic node before the cursor
+   *
+   * If none of these handle it (cursor mid-text, no structural operation),
+   * we fall back to deleting the single character before the cursor.
+   */
+  private handleBackspace(command: Command): void {
+    this.requireEditor(command.id, (editor) => {
+      const { state, view } = editor;
+      const { dispatch } = view;
+
+      /**
+       * Try the ProseMirror command chain. Each command returns true
+       * if it handled the backspace, false otherwise.
+       */
+      const handled =
+        deleteSelection(state, dispatch) ||
+        joinBackward(state, dispatch) ||
+        selectNodeBackward(state, dispatch);
+
+      if (!handled) {
+        /**
+         * None of the structural commands applied. This means the cursor
+         * is in a position where a simple character deletion is needed
+         * (e.g., mid-text). Delete the character immediately before the cursor.
+         */
+        const { from } = editor.state.selection;
+        if (from > 0) {
+          editor
+            .chain()
+            .focus()
+            .deleteRange({ from: from - 1, to: from })
+            .run();
+        }
+      }
+
+      this.sendResponse(command.id, true);
+    });
+  }
+
+  /**
+   * Simulate an Enter keypress through TipTap's keyboardShortcut command.
+   * This runs ProseMirror's full Enter keybinding chain which includes:
+   *   - newlineInCode (insert newline inside code blocks)
+   *   - createParagraphNear (create paragraph next to non-text blocks)
+   *   - liftEmptyBlock (lift out of empty blockquote/list)
+   *   - splitListItem (split list items correctly)
+   *   - splitBlock (default paragraph splitting)
+   *
+   * This gives the port correct context-sensitive enter behavior without
+   * needing to understand which block type the cursor is in.
+   */
+  private handleEnter(command: Command): void {
+    this.requireEditor(command.id, (editor) => {
+      editor.commands.keyboardShortcut("Enter");
       this.sendResponse(command.id, true);
     });
   }

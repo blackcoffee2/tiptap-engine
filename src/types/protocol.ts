@@ -437,6 +437,30 @@ export interface BlurCommand extends BaseCommand {
   payload: Record<string, never>;
 }
 
+// --- Keyboard Action Commands ---
+
+/**
+ * Triggers ProseMirror's full Backspace keybinding chain, which handles
+ * structural deletions (joining blocks, lifting list items, deleting
+ * atomic nodes) in addition to simple character deletion. Ports should
+ * prefer this over deleteRange for user-initiated backspace actions.
+ */
+export interface BackspaceCommand extends BaseCommand {
+  name: "backspace";
+  payload: Record<string, never>;
+}
+
+/**
+ * Triggers ProseMirror's full Enter keybinding chain, which handles
+ * context-sensitive splitting (list items, code blocks, blockquotes)
+ * rather than always inserting a plain paragraph split. Ports should
+ * prefer this over exec('splitBlock') for user-initiated enter actions.
+ */
+export interface EnterCommand extends BaseCommand {
+  name: "enter";
+  payload: Record<string, never>;
+}
+
 // --- Query Commands ---
 
 export interface GetStateCommand extends BaseCommand {
@@ -493,6 +517,8 @@ export type Command =
   | SelectAllCommand
   | FocusCommand
   | BlurCommand
+  | BackspaceCommand
+  | EnterCommand
   | GetStateCommand
   | IsActiveCommand
   | CanExecCommand

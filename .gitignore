@@ -31,3 +31,7 @@ pnpm-debug.log*
 
 # Vitest
 coverage/
+
+codetree.config.json
+codetree_code.txt
+codetree_tree.txt

@@ -17,6 +17,7 @@ All communication is JSON strings over the platform-specific bridge (WKWebView o
   - [Text Input](#text-input-commands)
   - [Generic Execution](#generic-execution)
   - [Selection](#selection-commands)
+  - [Keyboard Actions](#keyboard-action-commands)
   - [Queries](#query-commands)
 - [Events](#events)
 - [Responses](#responses)
@@ -280,15 +281,15 @@ With a range (e.g., after IME composition commit):
 
 #### `deleteRange`
 
-Delete content in a range or at the cursor (backspace behavior).
+Delete content in a range or at the cursor (simple character deletion).
 
 **Payload:**
 
-| Field   | Type                               | Required | Description                                                |
-| ------- | ---------------------------------- | -------- | ---------------------------------------------------------- |
-| `range` | `{ "from": number, "to": number }` | No       | Range to delete. If omitted, performs backspace at cursor. |
+| Field   | Type                               | Required | Description                                                           |
+| ------- | ---------------------------------- | -------- | --------------------------------------------------------------------- |
+| `range` | `{ "from": number, "to": number }` | No       | Range to delete. If omitted, deletes one character before the cursor. |
 
-Backspace (no range):
+Simple character deletion (no range):
 
 ```json
 { "type": "command", "id": "9", "name": "deleteRange", "payload": {} }
@@ -306,6 +307,8 @@ Explicit range:
 ```
 
 **Response:** `{ "success": true }`
+
+> **Note:** For user-initiated backspace actions, prefer the [`backspace`](#backspace) command instead. It runs ProseMirror's full keybinding chain which handles structural operations like joining blocks and lifting list items. `deleteRange` without a range only performs simple single-character deletion.
 
 ---
 
@@ -485,6 +488,62 @@ Remove logical focus from the editor.
 
 ---
 
+### Keyboard Action Commands
+
+These commands simulate real keypresses through ProseMirror's keybinding infrastructure. They give ports correct structural behavior without needing to understand the document model.
+
+Ports should prefer these over `deleteRange` (for backspace) and `exec('splitBlock')` (for enter) when handling user keyboard input, because the keybinding chains handle context-sensitive behavior that single commands miss.
+
+#### `backspace`
+
+Execute ProseMirror's full Backspace command chain, which handles:
+
+- Deleting the current selection (if non-empty)
+- Joining the current block with the previous one (e.g., merging two paragraphs)
+- Lifting list items out of their parent list
+- Selecting and deleting atomic nodes (images, horizontal rules)
+- Deleting a single character before the cursor (when no structural operation applies)
+
+**Payload:** None.
+
+```json
+{ "type": "command", "id": "20", "name": "backspace", "payload": {} }
+```
+
+**Response:** `{ "success": true }`
+
+**When to use `backspace` vs `deleteRange`:**
+
+- Use `backspace` for user-initiated backspace actions (hardware keyboard, on-screen keyboard backspace button). It handles all the structural edge cases automatically.
+- Use `deleteRange` with an explicit range when the port knows the exact range to delete (e.g., programmatic deletion, clearing a specific span of text).
+
+---
+
+#### `enter`
+
+Simulate an Enter keypress through TipTap's full Enter keybinding chain, which handles:
+
+- Inserting a newline inside code blocks
+- Creating a paragraph next to non-text blocks (images, horizontal rules)
+- Lifting out of empty blockquotes and list items
+- Splitting list items correctly (creating a new list item, not a new paragraph)
+- Splitting blocks (the default paragraph split behavior)
+
+**Payload:** None.
+
+```json
+{ "type": "command", "id": "21", "name": "enter", "payload": {} }
+```
+
+**Response:** `{ "success": true }`
+
+**When to use `enter` vs `exec('splitBlock')`:**
+
+- Use `enter` for user-initiated enter/return actions. It handles all block types correctly (lists, code blocks, blockquotes, etc.).
+- Use `exec('splitBlock')` only if you specifically want a plain block split regardless of context (rare).
+
+---
+
 ### Query Commands
 
 #### `getState`
@@ -494,7 +553,7 @@ Request a full state snapshot. Returns the same payload shape as the `stateChang
 **Payload:** None.
 
 ```json
-{ "type": "command", "id": "20", "name": "getState", "payload": {} }
+{ "type": "command", "id": "22", "name": "getState", "payload": {} }
 ```
 
 **Response:**
@@ -531,7 +590,7 @@ Check if a mark or node type is active at the current selection.
 ```json
 {
   "type": "command",
-  "id": "21",
+  "id": "23",
   "name": "isActive",
   "payload": { "name": "bold" }
 }
@@ -542,7 +601,7 @@ With attribute matching:
 ```json
 {
   "type": "command",
-  "id": "22",
+  "id": "24",
   "name": "isActive",
   "payload": { "name": "heading", "attrs": { "level": 1 } }
 }
@@ -570,7 +629,7 @@ Check if a command can execute in the current state.
 ```json
 {
   "type": "command",
-  "id": "23",
+  "id": "25",
   "name": "canExec",
   "payload": { "command": "toggleBold" }
 }
@@ -597,7 +656,7 @@ Get attributes of a mark or node type at the current selection.
 ```json
 {
   "type": "command",
-  "id": "24",
+  "id": "26",
   "name": "getAttributes",
   "payload": { "name": "heading" }
 }
