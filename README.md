@@ -1,5 +1,7 @@
 # Tiptap Engine
 
+[![Support on Patreon](https://img.shields.io/badge/Patreon-Support-f96854?logo=patreon&logoColor=white)](https://www.patreon.com/c/UmarBinAyaz1)
+
 A headless Tiptap runtime that exposes a platform-agnostic message-based API for native rich text editors. It runs unmodified Tiptap v3 and ProseMirror JavaScript inside the OS-provided WebView (WKWebView on iOS, Chromium-based WebView on Android) and pushes structured document state out through a JSON protocol.
 
 ProseMirror requires a real browser DOM — `document.createElement`, `Node.childNodes`, DOM mutation observers, and more. The OS WebView provides all of this for free. The WebView is invisible — a computation engine only. No pixels from the WebView ever reach the user's eyes. The native platform paints every pixel and handles every keystroke.
@@ -429,6 +431,10 @@ npm run test:watch
 ```
 
 ---
+
+## Support
+
+If this project is useful to you, consider supporting its development on [Patreon](https://www.patreon.com/c/UmarBinAyaz1). Your support helps me dedicate more time to building, maintaining, and improving these tools.
 
 ## License
 
