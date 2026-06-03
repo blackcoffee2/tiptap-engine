@@ -77,15 +77,14 @@ Events have no `id`. They are pushed whenever state changes.
 
 Create the editor. Must be the first command sent. Emits `schemaReady`, `ready`, and `stateChanged` events before the response.
 
+The engine loads a fixed extension set — Tiptap v3 StarterKit plus the Image node — with default options. The extension set is not selectable or configurable from the port; changing it is a build-time change to the engine.
+
 **Payload:**
 
-| Field        | Type                 | Required | Default                | Description                                   |
-| ------------ | -------------------- | -------- | ---------------------- | --------------------------------------------- |
-| `extensions` | `ExtensionConfig[]`  | No       | All default extensions | Extensions to enable                          |
-| `content`    | `object` or `string` | No       | Empty document         | Initial content as Tiptap JSON or HTML string |
-| `editable`   | `boolean`            | No       | `true`                 | Whether the editor starts in editable mode    |
-
-`ExtensionConfig` shape: `{ "name": "string", "options": { } }`
+| Field      | Type                 | Required | Default        | Description                                   |
+| ---------- | -------------------- | -------- | -------------- | --------------------------------------------- |
+| `content`  | `object` or `string` | No       | Empty document | Initial content as Tiptap JSON or HTML string |
+| `editable` | `boolean`            | No       | `true`         | Whether the editor starts in editable mode    |
 
 **Example:**
 
@@ -347,7 +346,7 @@ Set heading level (with args):
 }
 ```
 
-Insert a table:
+Insert an image:
 
 ```json
 {
@@ -355,8 +354,8 @@ Insert a table:
   "id": "13",
   "name": "exec",
   "payload": {
-    "command": "insertTable",
-    "args": { "rows": 3, "cols": 3, "withHeaderRow": true }
+    "command": "setImage",
+    "args": { "src": "https://example.com/image.png", "alt": "Example" }
   }
 }
 ```
@@ -674,7 +673,7 @@ Get attributes of a mark or node type at the current selection.
 
 ### `schemaReady`
 
-Emitted once after `init`, before `ready`. Contains the full schema introspection payload.
+Emitted once after `init`, before `ready`. Contains the full schema introspection payload for the loaded extension set (StarterKit + Image). This event is the authoritative source for which nodes, marks, and commands are available — ports should read it rather than hardcoding the list.
 
 ```json
 {
@@ -686,7 +685,7 @@ Emitted once after `init`, before `ready`. Contains the full schema introspectio
         "name": "paragraph",
         "contentExpression": "inline*",
         "group": "block",
-        "attrs": [{ "name": "textAlign", "default": null }],
+        "attrs": [],
         "isLeaf": false,
         "isInline": false,
         "isBlock": true
@@ -729,14 +728,14 @@ Emitted once after `init`, before `ready`. Contains the full schema introspectio
 
 Command types in the `commands` array:
 
-| Type          | Meaning                                   | UI Hint         |
-| ------------- | ----------------------------------------- | --------------- |
-| `toggle-mark` | Toggles an inline mark on/off             | Toggle button   |
-| `toggle-node` | Toggles a block node type                 | Toggle button   |
-| `set-node`    | Sets a block node type (no toggle)        | Dropdown option |
-| `wrap`        | Wraps selection in a node                 | Button          |
-| `lift`        | Lifts content out of a wrapping node      | Button          |
-| `action`      | One-shot action (undo, insertTable, etc.) | Button          |
+| Type          | Meaning                              | UI Hint         |
+| ------------- | ------------------------------------ | --------------- |
+| `toggle-mark` | Toggles an inline mark on/off        | Toggle button   |
+| `toggle-node` | Toggles a block node type            | Toggle button   |
+| `set-node`    | Sets a block node type (no toggle)   | Dropdown option |
+| `wrap`        | Wraps selection in a node            | Button          |
+| `lift`        | Lifts content out of a wrapping node | Button          |
+| `action`      | One-shot action (undo, redo, etc.)   | Button          |
 
 ### `ready`
 
@@ -851,16 +850,16 @@ Emitted when an error occurs in the engine.
 
 ### `extensionEvent`
 
-Generic passthrough for extension-specific events. The engine does not interpret these.
+Generic passthrough for extension-specific events. The engine does not interpret these — it forwards them to the port. The fixed extension set does not currently emit any such events; this remains in the protocol so that ports and future engine builds have a defined channel for extension-defined messages.
 
 ```json
 {
   "type": "event",
   "name": "extensionEvent",
   "payload": {
-    "extensionName": "mention",
-    "eventName": "suggestionQuery",
-    "data": { "query": "@john" }
+    "extensionName": "someExtension",
+    "eventName": "someEvent",
+    "data": {}
   }
 }
 ```
@@ -930,7 +929,7 @@ Every node in the document JSON carries position annotations.
   "type": "paragraph",
   "pos": 1,
   "end": 15,
-  "attrs": { "textAlign": "center" },
+  "attrs": { },
   "content": [ ... ],
   "marks": [{ "type": "bold", "attrs": {} }],
   "text": "Hello"
@@ -1018,24 +1017,22 @@ Represents a node type active at the current selection, with its attributes.
 
 ## Command Names for exec
 
-These are the most commonly used commands available through the `exec` command. The full list depends on which extensions are loaded (the `schemaReady` event reports all available commands).
+The engine loads a fixed extension set (Tiptap v3 StarterKit plus Image), so the commands available through `exec` are fixed. The tables below list them.
+
+The authoritative, machine-readable list for any given engine build is the `commands` array in the [`schemaReady`](#schemaready) event — ports should read that rather than relying on this table, which is maintained by hand and documents the current set for convenience.
 
 ### Formatting
 
-| Command             | Args                | Description          |
-| ------------------- | ------------------- | -------------------- |
-| `toggleBold`        | —                   | Toggle bold mark     |
-| `toggleItalic`      | —                   | Toggle italic mark   |
-| `toggleStrike`      | —                   | Toggle strikethrough |
-| `toggleCode`        | —                   | Toggle inline code   |
-| `toggleUnderline`   | —                   | Toggle underline     |
-| `toggleHighlight`   | `{ color? }`        | Toggle highlight     |
-| `toggleSuperscript` | —                   | Toggle superscript   |
-| `toggleSubscript`   | —                   | Toggle subscript     |
-| `setLink`           | `{ href, target? }` | Apply link mark      |
-| `unsetLink`         | —                   | Remove link mark     |
-| `setColor`          | `{ color }`         | Set text color       |
-| `unsetColor`        | —                   | Remove text color    |
+| Command           | Args                | Description          |
+| ----------------- | ------------------- | -------------------- |
+| `toggleBold`      | —                   | Toggle bold mark     |
+| `toggleItalic`    | —                   | Toggle italic mark   |
+| `toggleStrike`    | —                   | Toggle strikethrough |
+| `toggleCode`      | —                   | Toggle inline code   |
+| `toggleUnderline` | —                   | Toggle underline     |
+| `setLink`         | `{ href, target? }` | Apply link mark      |
+| `unsetLink`       | —                   | Remove link mark     |
+| `toggleLink`      | `{ href, target? }` | Toggle link mark     |
 
 ### Block Types
 
@@ -1053,26 +1050,9 @@ These are the most commonly used commands available through the `exec` command. 
 | ------------------- | ---- | ------------------- |
 | `toggleBulletList`  | —    | Toggle bullet list  |
 | `toggleOrderedList` | —    | Toggle ordered list |
-| `toggleTaskList`    | —    | Toggle task list    |
 | `sinkListItem`      | —    | Indent list item    |
 | `liftListItem`      | —    | Outdent list item   |
-
-### Tables
-
-| Command              | Args                               | Description               |
-| -------------------- | ---------------------------------- | ------------------------- |
-| `insertTable`        | `{ rows?, cols?, withHeaderRow? }` | Insert a table            |
-| `deleteTable`        | —                                  | Delete the current table  |
-| `addColumnBefore`    | —                                  | Add column before current |
-| `addColumnAfter`     | —                                  | Add column after current  |
-| `deleteColumn`       | —                                  | Delete current column     |
-| `addRowBefore`       | —                                  | Add row before current    |
-| `addRowAfter`        | —                                  | Add row after current     |
-| `deleteRow`          | —                                  | Delete current row        |
-| `mergeCells`         | —                                  | Merge selected cells      |
-| `splitCell`          | —                                  | Split a merged cell       |
-| `toggleHeaderRow`    | —                                  | Toggle header row         |
-| `toggleHeaderColumn` | —                                  | Toggle header column      |
+| `splitListItem`     | —    | Split a list item   |
 
 ### Insert
 
@@ -1081,13 +1061,6 @@ These are the most commonly used commands available through the `exec` command. 
 | `setHorizontalRule` | —                       | Insert horizontal rule          |
 | `setHardBreak`      | —                       | Insert hard break (shift+enter) |
 | `setImage`          | `{ src, alt?, title? }` | Insert image                    |
-
-### Alignment
-
-| Command          | Args            | Description                                               |
-| ---------------- | --------------- | --------------------------------------------------------- |
-| `setTextAlign`   | `{ alignment }` | Set text alignment ("left", "center", "right", "justify") |
-| `unsetTextAlign` | —               | Remove text alignment                                     |
 
 ### History
 

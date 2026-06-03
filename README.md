@@ -72,7 +72,6 @@ On every transaction, the engine serializes the document into annotated JSON wit
 
 - Document model, schema, state, transforms
 - Transaction processing and plugin lifecycle
-- Extension loading and configuration
 - Command execution (the full Tiptap command system)
 - Input rules and paste rules
 - Undo/redo history
@@ -117,8 +116,8 @@ Approximate bundle size (may vary with dependency updates):
 
 | Metric   | Size    |
 | -------- | ------- |
-| Minified | ~430 KB |
-| Gzipped  | ~130 KB |
+| Minified | ~374 KB |
+| Gzipped  | ~114 KB |
 
 The bundle is loaded from the device filesystem, not over a network. Parse time on modern iOS and Android devices is sub-second.
 
@@ -141,7 +140,7 @@ See [API.md](./API.md) for the complete reference with every command, event, and
 ### Initialization Sequence
 
 ```
-Port sends:    init { content, extensions, editable }
+Port sends:    init { content, editable }
 Engine emits:  schemaReady { nodes, marks, commands }
 Engine emits:  ready {}
 Engine emits:  stateChanged { doc, selection, activeMarks, commandStates, ... }
@@ -216,27 +215,17 @@ In-memory adapter for unit tests. Collects all outbound messages in an array wit
 
 ## Extensions
 
-The engine bundles all official open-source Tiptap v3 extensions. Users opt in/out by name in the `init` command. If no extensions are specified, the full default set is loaded.
+The engine runs with a fixed extension set: Tiptap v3 **StarterKit** plus the **Image** node, loaded with default options. The set is the same for every editor instance and is not selectable or configurable through the `init` command. Adding or changing extensions is a build-time change to the engine (`src/extensions/registry.ts`), not a runtime decision made by the port.
 
-The default set includes everything from StarterKit v3 (Blockquote, BulletList, CodeBlock, Document, HardBreak, Heading, HorizontalRule, ListItem, OrderedList, Paragraph, Text, Bold, Code, Italic, Link, Strike, Underline, Dropcursor, Gapcursor, UndoRedo, ListKeymap, TrailingNode) plus additional extensions (TextAlign, Image, Placeholder, Color, TextStyle, Table, Superscript, Subscript, Highlight, TaskList, Typography, CharacterCount). The authoritative list is the `DEFAULT_EXTENSIONS` array in `src/extensions/registry.ts`.
+StarterKit v3 provides:
 
-### Dependency Resolution
+- **Nodes:** Document, Paragraph, Text, Blockquote, BulletList, OrderedList, ListItem, Heading, CodeBlock, HorizontalRule, HardBreak
+- **Marks:** Bold, Italic, Strike, Code, Underline, Link
+- **Functional:** UndoRedo, Dropcursor, Gapcursor, ListKeymap, TrailingNode
 
-Extensions declare dependencies. Enabling `table` automatically includes `tableRow`, `tableCell`, and `tableHeader`. Enabling `taskList` automatically includes `taskItem`. Enabling `color` automatically includes `textStyle`.
+Beyond StarterKit, the engine adds the **Image** node.
 
-### Custom Configuration
-
-Extensions can be configured through the `init` command:
-
-```json
-{
-  "extensions": [
-    { "name": "heading", "options": { "levels": [1, 2, 3] } },
-    { "name": "link", "options": { "openOnClick": false } },
-    { "name": "placeholder", "options": { "placeholder": "Start writing..." } }
-  ]
-}
-```
+The `schemaReady` event reports the full set of available nodes, marks, and commands for the current build. Ports should treat that event as the authoritative source rather than hardcoding the list.
 
 ---
 
@@ -276,7 +265,7 @@ For typical documents (under 100KB of content), the full document JSON serializa
 
 **`src/core/state-serializer.ts`** — Converts ProseMirror's internal document representation into the annotated JSON format with `pos`/`end` on every node. This is what makes native hit-testing possible without the port needing to understand ProseMirror's position addressing.
 
-**`src/extensions/registry.ts`** — Maps extension name strings to Tiptap extension constructors. Handles dependency resolution and default configuration. Uses Tiptap v3's consolidated package structure (`@tiptap/extension-list`, `@tiptap/extension-table`, `@tiptap/extensions`).
+**`src/extensions/registry.ts`** — Builds the fixed extension set (StarterKit + Image) passed to the editor. Changing which extensions the engine bundles is done here.
 
 **`src/core/command-registry.ts`** — Discovers all available commands from loaded extensions and attaches behavioral metadata (toggle-mark, toggle-node, wrap, lift, action) for toolbar auto-generation. Maintains a manual metadata table for known commands since Tiptap's command system does not carry rich metadata natively.
 
@@ -286,15 +275,16 @@ For typical documents (under 100KB of content), the full document JSON serializa
 
 ## Tiptap Version
 
-Built on Tiptap v3 (^3.23.4). Uses the v3 consolidated package structure:
+Built on Tiptap v3 (^3.23.4). The bundled set draws from these packages:
 
-| Package                   | Contents                                                                   |
-| ------------------------- | -------------------------------------------------------------------------- |
-| `@tiptap/extension-list`  | BulletList, OrderedList, ListItem, TaskList, TaskItem, ListKeymap          |
-| `@tiptap/extension-table` | Table, TableRow, TableCell, TableHeader                                    |
-| `@tiptap/extensions`      | UndoRedo, Dropcursor, Gapcursor, Placeholder, CharacterCount, TrailingNode |
-| `@tiptap/core`            | Editor, Extension, Node, Mark base classes                                 |
-| `@tiptap/pm`              | ProseMirror dependencies                                                   |
+| Package                   | Contents                                              |
+| ------------------------- | ----------------------------------------------------- |
+| `@tiptap/starter-kit`     | The full StarterKit v3 node, mark, and functional set |
+| `@tiptap/extension-image` | Image node (the one addition beyond StarterKit)       |
+| `@tiptap/core`            | Editor, Extension, Node, Mark base classes            |
+| `@tiptap/pm`              | ProseMirror dependencies                              |
+
+StarterKit pulls its individual node, mark, and functional extension packages transitively, so they are not listed as direct dependencies.
 
 ---
 
