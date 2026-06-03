@@ -17,10 +17,7 @@ import {
   deleteSelection,
 } from "@tiptap/pm/commands";
 import type { BaseAdapter } from "../adapters/base";
-import {
-  resolveExtensions,
-  type ExtensionRequest,
-} from "../extensions/registry";
+import { buildExtensions } from "../extensions/registry";
 import {
   serializeDocument,
   serializeSelection,
@@ -271,16 +268,15 @@ export class TiptapEngine {
     }
 
     const payload = command.payload as {
-      extensions?: ExtensionRequest[];
       content?: Record<string, unknown> | string;
       editable?: boolean;
     };
 
     /**
-     * Resolve extension names to configured Tiptap extension instances.
-     * The registry handles dependency resolution and default extensions.
+     * The engine runs with a fixed extension set (StarterKit + Image).
+     * Extensions are not selectable or configurable from the port.
      */
-    const extensions = resolveExtensions(payload.extensions);
+    const extensions = buildExtensions();
 
     /**
      * Determine the mount element. In a WebView, we look for the

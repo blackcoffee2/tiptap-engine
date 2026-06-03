@@ -259,16 +259,6 @@ export interface ActiveNode {
 // ----------------------------------------------------------------------------
 
 /**
- * Configuration for an individual extension during initialization.
- * The name maps to the extension registry. Options are passed through
- * to the Tiptap extension's configure() method.
- */
-export interface ExtensionConfig {
-  name: string;
-  options?: Record<string, unknown>;
-}
-
-/**
  * Base interface for all commands. The id field is used to correlate
  * commands with their responses.
  */
@@ -285,14 +275,11 @@ export interface InitCommand extends BaseCommand {
   name: "init";
   payload: {
     /**
-     * Extensions to enable. If omitted, StarterKit defaults are used.
-     * Each entry specifies an extension name and optional configuration.
-     */
-    extensions?: ExtensionConfig[];
-
-    /**
      * Initial document content. Can be a Tiptap JSON document object
      * or an HTML string. If omitted, the editor starts empty.
+     *
+     * The engine always loads a fixed extension set (StarterKit + Image);
+     * extensions are not selectable or configurable from the port.
      */
     content?: Record<string, unknown> | string;
 
