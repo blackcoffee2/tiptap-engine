@@ -62,24 +62,6 @@ const KNOWN_COMMANDS: Record<string, CommandMetadata> = {
     args: [],
     group: "formatting",
   },
-  toggleHighlight: {
-    type: "toggle-mark",
-    associatedType: "highlight",
-    args: [{ name: "color", required: false }],
-    group: "formatting",
-  },
-  toggleSuperscript: {
-    type: "toggle-mark",
-    associatedType: "superscript",
-    args: [],
-    group: "formatting",
-  },
-  toggleSubscript: {
-    type: "toggle-mark",
-    associatedType: "subscript",
-    args: [],
-    group: "formatting",
-  },
   setLink: {
     type: "action",
     associatedType: "link",
@@ -102,18 +84,6 @@ const KNOWN_COMMANDS: Record<string, CommandMetadata> = {
       { name: "href", required: true },
       { name: "target", required: false },
     ],
-    group: "formatting",
-  },
-  setColor: {
-    type: "action",
-    associatedType: "textStyle",
-    args: [{ name: "color", required: true }],
-    group: "formatting",
-  },
-  unsetColor: {
-    type: "action",
-    associatedType: "textStyle",
-    args: [],
     group: "formatting",
   },
 
@@ -174,12 +144,6 @@ const KNOWN_COMMANDS: Record<string, CommandMetadata> = {
     args: [],
     group: "lists",
   },
-  toggleTaskList: {
-    type: "toggle-node",
-    associatedType: "taskList",
-    args: [],
-    group: "lists",
-  },
   sinkListItem: {
     type: "action",
     associatedType: "listItem",
@@ -219,102 +183,6 @@ const KNOWN_COMMANDS: Record<string, CommandMetadata> = {
       { name: "title", required: false },
     ],
     group: "insert",
-  },
-
-  // --- Table commands ---
-  insertTable: {
-    type: "action",
-    associatedType: "table",
-    args: [
-      { name: "rows", required: false },
-      { name: "cols", required: false },
-      { name: "withHeaderRow", required: false },
-    ],
-    group: "table",
-  },
-  deleteTable: {
-    type: "action",
-    associatedType: "table",
-    args: [],
-    group: "table",
-  },
-  addColumnBefore: {
-    type: "action",
-    associatedType: "table",
-    args: [],
-    group: "table",
-  },
-  addColumnAfter: {
-    type: "action",
-    associatedType: "table",
-    args: [],
-    group: "table",
-  },
-  deleteColumn: {
-    type: "action",
-    associatedType: "table",
-    args: [],
-    group: "table",
-  },
-  addRowBefore: {
-    type: "action",
-    associatedType: "table",
-    args: [],
-    group: "table",
-  },
-  addRowAfter: {
-    type: "action",
-    associatedType: "table",
-    args: [],
-    group: "table",
-  },
-  deleteRow: {
-    type: "action",
-    associatedType: "table",
-    args: [],
-    group: "table",
-  },
-  mergeCells: {
-    type: "action",
-    associatedType: "table",
-    args: [],
-    group: "table",
-  },
-  splitCell: {
-    type: "action",
-    associatedType: "table",
-    args: [],
-    group: "table",
-  },
-  toggleHeaderRow: {
-    type: "action",
-    associatedType: "table",
-    args: [],
-    group: "table",
-  },
-  toggleHeaderColumn: {
-    type: "action",
-    associatedType: "table",
-    args: [],
-    group: "table",
-  },
-  toggleHeaderCell: {
-    type: "action",
-    associatedType: "table",
-    args: [],
-    group: "table",
-  },
-
-  // --- Text alignment ---
-  setTextAlign: {
-    type: "action",
-    args: [{ name: "alignment", required: true }],
-    group: "alignment",
-  },
-  unsetTextAlign: {
-    type: "action",
-    args: [],
-    group: "alignment",
   },
 
   // --- History ---
