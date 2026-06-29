@@ -7,6 +7,28 @@
 //
 // The engine is the single orchestration point: it owns the editor lifecycle,
 // hooks into transactions, serializes state, and manages command execution.
+//
+// Performance instrumentation:
+// This engine measures how it spends the JavaScript-side slice of each
+// command's round-trip, so the port can subtract engine compute from the
+// full send-to-response time it measures itself and isolate transport cost.
+// A PhaseTimer (core/metrics.ts) records phase durations; the durations ride
+// back on the Response (handle) and on stateChanged (the full build
+// breakdown). Timing is always on — a permanent engine capability, not an
+// opt-in diagnostic — but the timings field is attached only to messages
+// where at least one phase was actually timed, so it is omitted for the
+// untimed initial-state emission and any internal build path. The stateChanged
+// event also carries a causedBy id correlating it to the command that produced
+// it, so the port's typing-latency tracker can pair a keystroke with its
+// repaint exactly rather than by in-order approximation.
+//
+// Measurement in progress: the commandStates sweep is the dominant
+// per-keystroke cost. It is split here into two sub-phases — commandStatesCan
+// (the editor.can()[name]() dry-run half) and commandStatesActive (the
+// editor.isActive(name) half) — to determine which half dominates before
+// deciding whether deriving isActive from already-computed active marks/nodes
+// is worth doing. This split is measurement only; it does not change what the
+// sweep computes or returns.
 // ============================================================================
 
 import { Editor } from "@tiptap/core";
@@ -28,6 +50,7 @@ import {
 } from "./state-serializer";
 import { inspectNodeTypes, inspectMarkTypes } from "./schema-inspector";
 import { discoverCommands } from "./command-registry";
+import { PhaseTimer, Phase } from "./metrics";
 import type {
   Command,
   Response,
@@ -40,14 +63,26 @@ import type {
   ErrorEvent,
   CommandState,
   SchemaMetadata,
+  Timings,
 } from "../types/protocol";
 
 /**
  * Computes the command states map that drives toolbar UI. For each
  * discovered command, determines whether it can execute and whether
  * its associated mark/node is active at the current selection.
+ *
+ * When a timer is supplied, the two halves of the per-command work are
+ * accumulated into separate sub-phases: commandStatesCan (the can() dry-run)
+ * and commandStatesActive (the isActive() check). The two halves are bracketed
+ * individually inside the loop and summed via the timer's clock()/add(), so
+ * their totals reveal which half dominates the sweep. The timer does not
+ * change which commands are visited or what is computed — the same can() and
+ * isActive() calls run in the same order regardless.
  */
-function computeCommandStates(editor: Editor): Record<string, CommandState> {
+function computeCommandStates(
+  editor: Editor,
+  timer?: PhaseTimer | null
+): Record<string, CommandState> {
   const states: Record<string, CommandState> = {};
 
   /**
@@ -70,8 +105,11 @@ function computeCommandStates(editor: Editor): Record<string, CommandState> {
     /**
      * Check canExec by calling the command through the can() proxy.
      * Some commands require arguments, so we wrap in try/catch and
-     * default to false on failure.
+     * default to false on failure. Timed as the commandStatesCan
+     * sub-phase: the elapsed time of this call is folded into the
+     * running can() total.
      */
+    const canStart = timer ? timer.clock() : 0;
     try {
       const canMethod = (canProxy as Record<string, Function>)[name];
       if (typeof canMethod === "function") {
@@ -80,16 +118,24 @@ function computeCommandStates(editor: Editor): Record<string, CommandState> {
     } catch {
       canExec = false;
     }
+    if (timer) {
+      timer.add(Phase.commandStatesCan, timer.clock() - canStart);
+    }
 
     /**
      * Check isActive for marks and nodes. We try both — if the name
      * matches a mark type or node type in the schema, editor.isActive()
-     * will return a meaningful result.
+     * will return a meaningful result. Timed as the commandStatesActive
+     * sub-phase.
      */
+    const activeStart = timer ? timer.clock() : 0;
     try {
       isActive = editor.isActive(name);
     } catch {
       isActive = false;
+    }
+    if (timer) {
+      timer.add(Phase.commandStatesActive, timer.clock() - activeStart);
     }
 
     const state: CommandState = { canExec, isActive };
@@ -164,6 +210,33 @@ export class TiptapEngine {
    */
   private lastDocJson: string = "";
 
+  /**
+   * The id of the command currently being handled, set on entry to
+   * handleCommand and cleared on exit. onTransaction reads it to stamp the
+   * causedBy field on the stateChanged it emits, correlating the state change
+   * with the command that triggered it.
+   *
+   * A command handler runs synchronously, and the transactions a command
+   * dispatches fire synchronously within that handler (ProseMirror applies
+   * the transaction and the onTransaction callback runs before the command
+   * returns). So while this field is set, any transaction observed is
+   * attributable to this command. Transactions that fire outside a command
+   * handler (the initial state during init, async plugin transactions, input
+   * rules running off a later tick) see a null field and emit no causedBy,
+   * which is the correct "not attributable to one command" signal.
+   */
+  private currentCommandId: string | null = null;
+
+  /**
+   * The PhaseTimer for the command currently being handled, set on entry to
+   * handleCommand. onTransaction uses it to record the state-build sub-phases
+   * (serializeDoc, commandStates, active, docDiff, total) into the same timer
+   * whose handle phase the command handler is measuring, so a single Response
+   * or stateChanged carries a coherent breakdown. Null when no command is in
+   * flight (the same out-of-handler cases as currentCommandId).
+   */
+  private currentTimer: PhaseTimer | null = null;
+
   constructor(adapter: BaseAdapter) {
     this.adapter = adapter;
     this.adapter.onCommand(this.handleCommand.bind(this));
@@ -172,8 +245,21 @@ export class TiptapEngine {
   /**
    * Central command dispatcher. Routes incoming commands to the
    * appropriate handler method and sends back a response.
+   *
+   * Wraps the dispatch in a PhaseTimer: the handle phase spans from here to
+   * the point each handler calls sendResponse. The timer and the command id
+   * are stored on the instance so onTransaction — which fires synchronously
+   * inside a mutating handler — can record the state-build sub-phases into
+   * the same timer and stamp the resulting stateChanged with this command's
+   * id. Both fields are cleared in finally so out-of-handler transactions are
+   * never misattributed.
    */
   private handleCommand(command: Command): void {
+    const timer = new PhaseTimer();
+    this.currentCommandId = command.id;
+    this.currentTimer = timer;
+    timer.start(Phase.handle);
+
     try {
       switch (command.name) {
         case "init":
@@ -251,6 +337,15 @@ export class TiptapEngine {
         message,
       });
       this.emitError("COMMAND_FAILED", message, command.id);
+    } finally {
+      /**
+       * Clear the per-command instrumentation fields so any transaction
+       * that fires after the handler returns (async plugin work, a later
+       * input-rule tick) is not attributed to this command and emits no
+       * causedBy or sub-phase timings.
+       */
+      this.currentCommandId = null;
+      this.currentTimer = null;
     }
   }
 
@@ -344,6 +439,12 @@ export class TiptapEngine {
      * Tiptap versions, the editor may not fire an onTransaction
      * callback during construction, so we emit this explicitly to
      * guarantee the port always gets the initial state.
+     *
+     * This emission is not attributed to the init command via causedBy:
+     * it is the initial full-state push, not a keystroke-style state
+     * change, so the port's latency pairing should ignore it. It is built
+     * without the command timer for the same reason — init cold-start time
+     * is tracked separately by the port's load phases, not the typing path.
      */
     const initialState: StateChangedEvent = {
       type: "event",
@@ -730,6 +831,13 @@ export class TiptapEngine {
   /**
    * Called on every ProseMirror transaction. Determines what changed and
    * emits the appropriate events (stateChanged, contentChanged, selectionChanged).
+   *
+   * When a command is in flight (currentTimer set), the state-build sub-phases
+   * and the docDiff comparison are recorded into that command's timer, and the
+   * total time inside this method is recorded as the total phase. The emitted
+   * stateChanged is stamped with the command's id (causedBy) and carries the
+   * accumulated timings. Transactions firing outside a command handler record
+   * nothing and emit no causedBy.
    */
   private onTransaction(_transaction: Transaction): void {
     if (!this.editor) {
@@ -737,24 +845,49 @@ export class TiptapEngine {
     }
 
     const editor = this.editor;
-    const statePayload = this.buildStatePayload(editor);
+    const timer = this.currentTimer;
+    const causedBy = this.currentCommandId;
+
+    /**
+     * Record total onTransaction time when a command timer is present. The
+     * span wraps the entire method body below; we open it here and close it
+     * just before returning. buildStatePayload, given the same timer, records
+     * its own sub-phases inside this span.
+     */
+    if (timer) {
+      timer.start(Phase.total);
+    }
+
+    const statePayload = this.buildStatePayload(editor, timer);
 
     /**
      * Detect whether the document content changed by comparing the
      * serialized document JSON. This is cheaper than deep comparison
-     * for typical-sized documents.
+     * for typical-sized documents. Timed as the docDiff phase — this is
+     * the second full-document JSON.stringify per transaction (the first
+     * being inside serialization), so its cost is worth isolating.
      */
-    const currentDocJson = JSON.stringify(statePayload.doc);
+    const currentDocJson = timer
+      ? timer.measure(Phase.docDiff, () => JSON.stringify(statePayload.doc))
+      : JSON.stringify(statePayload.doc);
     const docChanged = currentDocJson !== this.lastDocJson;
 
     /**
-     * Always emit stateChanged with the full state.
-     * This is the primary event ports use to re-render.
+     * Always emit stateChanged with the full state. This is the primary
+     * event ports use to re-render. Close the total span first so the timing
+     * attached reflects the build + diff work; the send itself is part of the
+     * round-trip the port already measures.
      */
+    if (timer) {
+      timer.stop(Phase.total);
+    }
+
     const stateChangedEvent: StateChangedEvent = {
       type: "event",
       name: "stateChanged",
       payload: statePayload,
+      ...(causedBy ? { causedBy } : {}),
+      ...this.timingsField(timer),
     };
     this.adapter.send(stateChangedEvent);
 
@@ -793,8 +926,50 @@ export class TiptapEngine {
   /**
    * Build the full state payload that's included in stateChanged events
    * and getState responses.
+   *
+   * When a timer is supplied, the three expensive build steps are recorded
+   * as separate phases: serializeDoc (the recursive tree walk), commandStates
+   * (the canExec + isActive sweep over every command), and active (the
+   * combined active-marks/nodes/stored-marks extraction). The commandStates
+   * call is additionally passed the timer so it can split its own cost into
+   * the commandStatesCan and commandStatesActive sub-phases. When no timer is
+   * supplied (getState, init), the steps run untimed. The behavior of each
+   * step is unchanged either way — measure() passes the result through and the
+   * sweep visits the same commands.
    */
-  private buildStatePayload(editor: Editor): StateChangedEvent["payload"] {
+  private buildStatePayload(
+    editor: Editor,
+    timer?: PhaseTimer | null
+  ): StateChangedEvent["payload"] {
+    if (timer) {
+      const doc = timer.measure(Phase.serializeDoc, () =>
+        serializeDocument(editor.state)
+      );
+      const selection = serializeSelection(editor.state);
+      const commandStates = timer.measure(Phase.commandStates, () =>
+        computeCommandStates(editor, timer)
+      );
+      const { activeMarks, activeNodes, storedMarks } = timer.measure(
+        Phase.active,
+        () => ({
+          activeMarks: getActiveMarks(editor.state),
+          activeNodes: getActiveNodes(editor.state),
+          storedMarks: getStoredMarks(editor.state),
+        })
+      );
+
+      return {
+        doc,
+        selection,
+        activeMarks,
+        activeNodes,
+        commandStates,
+        decorations: getDecorations(editor.state),
+        storedMarks,
+        editable: editor.isEditable,
+      };
+    }
+
     return {
       doc: serializeDocument(editor.state),
       selection: serializeSelection(editor.state),
@@ -828,6 +1003,13 @@ export class TiptapEngine {
 
   /**
    * Send a response message correlated to a command by id.
+   *
+   * Closes the handle phase on the current command's timer (the span opened
+   * in handleCommand) and attaches the accumulated timings to the response.
+   * The handle phase therefore measures from dispatch entry to this point —
+   * for mutating commands it includes the synchronous onTransaction work, so
+   * handle is the engine's total JavaScript-side cost for the command and the
+   * sub-phases on the stateChanged break it down.
    */
   private sendResponse(
     id: string,
@@ -835,14 +1017,36 @@ export class TiptapEngine {
     payload?: unknown,
     error?: { code: string; message: string }
   ): void {
+    const timer = this.currentTimer;
+    if (timer) {
+      timer.stop(Phase.handle);
+    }
+
     const response: Response = {
       type: "response",
       id,
       success,
       payload,
       error,
+      ...this.timingsField(timer),
     };
     this.adapter.send(response);
+  }
+
+  /**
+   * Build the optional timings field spread for a message. Returns an object
+   * with a timings key only when the timer exists and recorded at least one
+   * phase, so disabled or empty timers add nothing to the message (and the
+   * field is absent on the wire rather than present-and-empty). Spreading the
+   * result keeps the call sites clean: `...this.timingsField(timer)`.
+   */
+  private timingsField(timer: PhaseTimer | null | undefined): {
+    timings?: Timings;
+  } {
+    if (timer && timer.hasTimings()) {
+      return { timings: timer.toTimings() };
+    }
+    return {};
   }
 
   /**
