@@ -137,6 +137,60 @@ export interface DecorationInfo {
 }
 
 // ----------------------------------------------------------------------------
+// Performance Timing Types
+//
+// The engine optionally reports how long it spent in each internal phase of
+// handling a command or building a state payload. These are DURATIONS in
+// milliseconds, never timestamps: the engine's clock (performance.now(),
+// relative to page load) and the port's clock (Dart DateTime.now(),
+// wall-clock) live in different domains and cannot be compared directly. The
+// port already measures the full send-to-response round-trip on its own side;
+// these durations let it subtract the engine's internal work from that total
+// to isolate transport cost from compute cost.
+//
+// The Timings object is sparse: only the phases actually measured for a given
+// message appear. A Response that did not build state carries just { handle },
+// while a stateChanged carries the full build breakdown. The port treats every
+// key as optional.
+//
+// Timing is a permanent capability of the engine: every command handle and
+// state build is measured. The timings field is nonetheless optional on the
+// wire because the engine omits it for messages where no phase was timed (an
+// internal build path, or a message produced without a timer). A present
+// timings field therefore always carries at least one real measurement. The
+// field is additive — a port that does not read it is unaffected.
+// ----------------------------------------------------------------------------
+
+export interface Timings {
+  /**
+   * Total time inside the command handler, from dispatch entry to just
+   * before the response is sent. Present on responses when measured.
+   */
+  handle?: number;
+
+  /** The recursive serializeDocument walk of the full document tree. */
+  serializeDoc?: number;
+
+  /**
+   * The computeCommandStates sweep: canExec + isActive for every command.
+   * Expected to dominate per-keystroke cost on non-trivial documents.
+   */
+  commandStates?: number;
+
+  /** getActiveMarks + getActiveNodes + getStoredMarks combined. */
+  active?: number;
+
+  /** The JSON.stringify(doc) change-detection comparison in onTransaction. */
+  docDiff?: number;
+
+  /**
+   * Total time inside onTransaction, covering the state build, the diff,
+   * and the adapter send calls. Present on stateChanged events when measured.
+   */
+  total?: number;
+}
+
+// ----------------------------------------------------------------------------
 // Schema Introspection Types
 //
 // Emitted once via the schemaReady event. Ports use this metadata to
@@ -578,6 +632,29 @@ export interface StateChangedEvent extends BaseEvent {
     /** Whether the editor is currently editable */
     editable: boolean;
   };
+
+  /**
+   * The id of the command that caused this state change, when the change was
+   * the direct result of handling one command. Lets the port correlate a
+   * stateChanged exactly with the command that produced it — used by the
+   * port's typing-latency tracker to pair a keystroke with its resulting
+   * repaint precisely, instead of an in-order approximation.
+   *
+   * Absent for state changes not attributable to a single command (e.g. the
+   * initial state emitted during init, or changes from input rules / async
+   * plugin transactions that aren't running inside a command handler).
+   */
+  causedBy?: string;
+
+  /**
+   * Optional per-phase timing breakdown for building and emitting this state
+   * (durations in ms; see the Timings type). Present whenever the engine timed
+   * at least one phase for this message — which is the normal case for a
+   * command-driven state change. Absent only when the state was produced
+   * without a timer (e.g. the initial state emitted during init). The port
+   * treats its absence as "no timing available".
+   */
+  timings?: Timings;
 }
 
 /**
@@ -680,6 +757,17 @@ export interface Response {
 
   /** Error details when success is false */
   error?: ResponseError;
+
+  /**
+   * Optional timing breakdown for handling this command (durations in ms;
+   * see the Timings type). A sibling of payload rather than nested inside it,
+   * so query result shapes stay clean and the field can be read or ignored
+   * without touching payload parsing. Present whenever the engine timed at
+   * least one phase while handling the command (the normal case); absent only
+   * for a message produced without a timer. The port treats its absence as
+   * "no timing available".
+   */
+  timings?: Timings;
 }
 
 // ----------------------------------------------------------------------------
