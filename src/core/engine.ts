@@ -16,19 +16,43 @@
 // back on the Response (handle) and on stateChanged (the full build
 // breakdown). Timing is always on — a permanent engine capability, not an
 // opt-in diagnostic — but the timings field is attached only to messages
-// where at least one phase was actually timed, so it is omitted for the
-// untimed initial-state emission and any internal build path. The stateChanged
-// event also carries a causedBy id correlating it to the command that produced
-// it, so the port's typing-latency tracker can pair a keystroke with its
-// repaint exactly rather than by in-order approximation.
+// where at least one phase was actually timed. The stateChanged event also
+// carries a causedBy id correlating it to the command that produced it.
 //
-// Measurement in progress: the commandStates sweep is the dominant
-// per-keystroke cost. It is split here into two sub-phases — commandStatesCan
-// (the editor.can()[name]() dry-run half) and commandStatesActive (the
-// editor.isActive(name) half) — to determine which half dominates before
-// deciding whether deriving isActive from already-computed active marks/nodes
-// is worth doing. This split is measurement only; it does not change what the
-// sweep computes or returns.
+// commandStates timing:
+// Measurement established that the per-keystroke engine cost is dominated by
+// the canExec dry-run half of the command-state sweep — editor.can()[name]()
+// run for every command on every transaction, where each call builds and
+// discards a trial transaction. The sweep computes both canExec and isActive
+// for every command. The can() and isActive() halves are timed separately
+// (commandStatesCan / commandStatesActive) so that dominant cost stays visible
+// in the overlay.
+//
+// Per-command emission coalescing:
+// A single keystroke produces more than one ProseMirror transaction — the
+// content insertion, plus follow-on transactions such as the trailing-node
+// append (StarterKit's TrailingNode) or a selection/stored-mark settle. Each
+// transaction fired onTransaction, which previously rebuilt and re-emitted the
+// full state every time. Measurement showed the state build running about
+// twice per command (the build sub-phases logged ~2x the count of command
+// handles), doubling both engine compute and the number of stateChanged
+// messages crossing the bridge per keystroke.
+//
+// To fix this without risking a document desync, emission is coalesced per
+// command rather than per transaction. While a command is in flight, each
+// onTransaction firing only marks the editor state dirty; the engine then
+// builds and emits state ONCE, after the command handler's synchronous work
+// (including all the transactions it dispatched) has completed, reflecting the
+// final settled state. This is safe regardless of why a keystroke produces
+// multiple transactions: whether a follow-on transaction changed the document
+// (trailing node) or only the selection, emitting the final state once per
+// command is always correct — the port receives exactly the end state, just
+// once instead of once per intermediate transaction.
+//
+// Transactions that fire with NO command in flight (asynchronous plugin work,
+// external edits) cannot be coalesced against a command boundary, so they fall
+// back to emitting immediately, exactly as before. This preserves delivery of
+// state changes the engine causes outside the command path.
 // ============================================================================
 
 import { Editor } from "@tiptap/core";
@@ -68,16 +92,17 @@ import type {
 
 /**
  * Computes the command states map that drives toolbar UI. For each
- * discovered command, determines whether it can execute and whether
- * its associated mark/node is active at the current selection.
+ * discovered command, determines whether it can execute (canExec) and whether
+ * its associated mark/node is active at the current selection (isActive).
  *
  * When a timer is supplied, the two halves of the per-command work are
  * accumulated into separate sub-phases: commandStatesCan (the can() dry-run)
- * and commandStatesActive (the isActive() check). The two halves are bracketed
- * individually inside the loop and summed via the timer's clock()/add(), so
- * their totals reveal which half dominates the sweep. The timer does not
- * change which commands are visited or what is computed — the same can() and
- * isActive() calls run in the same order regardless.
+ * and commandStatesActive (the isActive check). The split is retained as
+ * permanent instrumentation: the can() dry-run is the dominant half (it builds
+ * and discards a trial transaction per command), so keeping the two timed
+ * separately makes that cost visible if the sweep is ever revisited. The timer
+ * does not change which commands are visited or what is computed — the same
+ * can() and isActive() calls run in the same order regardless.
  */
 function computeCommandStates(
   editor: Editor,
@@ -93,8 +118,8 @@ function computeCommandStates(
   const canProxy = editor.can();
 
   /**
-   * We iterate over all known commands. For commands that have an
-   * associated mark or node, we also check isActive.
+   * We iterate over all known commands. For commands in the curated set we
+   * also check canExec; for all commands we check isActive.
    */
   const commandNames = Object.keys(editor.commands);
 
@@ -103,11 +128,12 @@ function computeCommandStates(
     let isActive = false;
 
     /**
-     * Check canExec by calling the command through the can() proxy.
-     * Some commands require arguments, so we wrap in try/catch and
-     * default to false on failure. Timed as the commandStatesCan
-     * sub-phase: the elapsed time of this call is folded into the
-     * running can() total.
+     * Check canExec by calling the command through the can() proxy. Some
+     * commands require arguments, so we wrap in try/catch and default to
+     * false on failure. Computed for every command; timed as the
+     * commandStatesCan sub-phase — this is the dominant half of the sweep
+     * (each call builds and discards a trial transaction), which is why the
+     * split timing is retained even though both halves run for all commands.
      */
     const canStart = timer ? timer.clock() : 0;
     try {
@@ -212,30 +238,40 @@ export class TiptapEngine {
 
   /**
    * The id of the command currently being handled, set on entry to
-   * handleCommand and cleared on exit. onTransaction reads it to stamp the
-   * causedBy field on the stateChanged it emits, correlating the state change
-   * with the command that triggered it.
+   * handleCommand and cleared on exit. The coalesced flush reads it to stamp
+   * the causedBy field on the stateChanged it emits, correlating the state
+   * change with the command that triggered it.
    *
    * A command handler runs synchronously, and the transactions a command
    * dispatches fire synchronously within that handler (ProseMirror applies
-   * the transaction and the onTransaction callback runs before the command
+   * each transaction and the onTransaction callback runs before the command
    * returns). So while this field is set, any transaction observed is
    * attributable to this command. Transactions that fire outside a command
-   * handler (the initial state during init, async plugin transactions, input
-   * rules running off a later tick) see a null field and emit no causedBy,
-   * which is the correct "not attributable to one command" signal.
+   * handler see a null field and are emitted immediately with no causedBy.
    */
   private currentCommandId: string | null = null;
 
   /**
    * The PhaseTimer for the command currently being handled, set on entry to
-   * handleCommand. onTransaction uses it to record the state-build sub-phases
-   * (serializeDoc, commandStates, active, docDiff, total) into the same timer
-   * whose handle phase the command handler is measuring, so a single Response
-   * or stateChanged carries a coherent breakdown. Null when no command is in
-   * flight (the same out-of-handler cases as currentCommandId).
+   * handleCommand. The coalesced flush uses it to record the state-build
+   * sub-phases into the same timer whose handle phase the command handler is
+   * measuring, so a single Response or stateChanged carries a coherent
+   * breakdown. Null when no command is in flight.
    */
   private currentTimer: PhaseTimer | null = null;
+
+  /**
+   * Set by onTransaction while a command is in flight to mark that at least
+   * one transaction occurred during this command and a state emission is
+   * therefore owed. The command flush (flushPendingState) reads and clears it
+   * after the handler's synchronous work completes, building and emitting
+   * state once for however many transactions the command produced.
+   *
+   * This is the mechanism that coalesces a keystroke's multiple transactions
+   * (content insert + trailing-node append + selection settle) into a single
+   * build and a single emit.
+   */
+  private stateDirty: boolean = false;
 
   constructor(adapter: BaseAdapter) {
     this.adapter = adapter;
@@ -247,17 +283,33 @@ export class TiptapEngine {
    * appropriate handler method and sends back a response.
    *
    * Wraps the dispatch in a PhaseTimer: the handle phase spans from here to
-   * the point each handler calls sendResponse. The timer and the command id
-   * are stored on the instance so onTransaction — which fires synchronously
-   * inside a mutating handler — can record the state-build sub-phases into
-   * the same timer and stamp the resulting stateChanged with this command's
-   * id. Both fields are cleared in finally so out-of-handler transactions are
-   * never misattributed.
+   * the point each handler calls sendResponse. The timer, the command id, and
+   * the per-command dirty flag are stored on the instance so onTransaction —
+   * which fires synchronously inside a mutating handler — can mark state dirty
+   * rather than emit, and so the single post-handler flush can build once,
+   * emit once, and stamp the result with this command's id.
+   *
+   * Emission ordering within a command:
+   *   1. handler body runs; each dispatched transaction fires onTransaction,
+   *      which sets stateDirty (no emit yet);
+   *   2. the handler calls sendResponse, closing the handle timer and sending
+   *      the response;
+   *   3. flushPendingState runs (still inside this synchronous call, with the
+   *      command context intact), building and emitting the coalesced state
+   *      once if dirty;
+   *   4. finally clears the command context.
+   *
+   * The flush is placed after sendResponse so the handle phase measures the
+   * command's execution work, and the build/emit is attributed to the same
+   * timer via its own sub-phases. The response is sent before the state event,
+   * preserving the existing response-then-event ordering the port already
+   * sees.
    */
   private handleCommand(command: Command): void {
     const timer = new PhaseTimer();
     this.currentCommandId = command.id;
     this.currentTimer = timer;
+    this.stateDirty = false;
     timer.start(Phase.handle);
 
     try {
@@ -330,6 +382,13 @@ export class TiptapEngine {
           });
         }
       }
+
+      /**
+       * Emit the coalesced state once, after the handler's synchronous work
+       * (and therefore all transactions it dispatched) has completed. No-op
+       * when the command produced no transaction (queries, no-op commands).
+       */
+      this.flushPendingState();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       this.sendResponse(command.id, false, undefined, {
@@ -339,13 +398,14 @@ export class TiptapEngine {
       this.emitError("COMMAND_FAILED", message, command.id);
     } finally {
       /**
-       * Clear the per-command instrumentation fields so any transaction
-       * that fires after the handler returns (async plugin work, a later
-       * input-rule tick) is not attributed to this command and emits no
-       * causedBy or sub-phase timings.
+       * Clear the per-command context so any transaction that fires after the
+       * handler returns (async plugin work, a later input-rule tick) is not
+       * attributed to this command — it will take the immediate-emit fallback
+       * in onTransaction instead.
        */
       this.currentCommandId = null;
       this.currentTimer = null;
+      this.stateDirty = false;
     }
   }
 
@@ -390,9 +450,9 @@ export class TiptapEngine {
       editable: payload.editable !== false,
 
       /**
-       * Hook into every transaction to emit state updates.
-       * This is the primary mechanism by which the engine pushes
-       * state to the port.
+       * Hook into every transaction to track state changes. During a command
+       * this only marks state dirty (the command flush emits once); outside a
+       * command it emits immediately.
        */
       onTransaction: ({ transaction }) => {
         this.onTransaction(transaction);
@@ -434,18 +494,18 @@ export class TiptapEngine {
     this.adapter.send(readyEvent);
 
     /**
-     * Emit an initial stateChanged event so the port receives the
-     * full document state immediately after initialization. In some
-     * Tiptap versions, the editor may not fire an onTransaction
-     * callback during construction, so we emit this explicitly to
-     * guarantee the port always gets the initial state.
+     * Emit an initial stateChanged event so the port receives the full
+     * document state immediately after initialization, in case editor
+     * construction did not fire onTransaction. This is built without the
+     * command timer and is not attributed via causedBy: it is the initial
+     * full-state push, not a keystroke-style change.
      *
-     * This emission is not attributed to the init command via causedBy:
-     * it is the initial full-state push, not a keystroke-style state
-     * change, so the port's latency pairing should ignore it. It is built
-     * without the command timer for the same reason — init cold-start time
-     * is tracked separately by the port's load phases, not the typing path.
+     * Clear any dirty flag set by transactions that fired during construction
+     * first, so the post-handler flush does not emit a second, redundant
+     * initial state: this explicit emit already carries the full state.
      */
+    this.stateDirty = false;
+
     const initialState: StateChangedEvent = {
       type: "event",
       name: "stateChanged",
@@ -829,30 +889,80 @@ export class TiptapEngine {
   // ==========================================================================
 
   /**
-   * Called on every ProseMirror transaction. Determines what changed and
-   * emits the appropriate events (stateChanged, contentChanged, selectionChanged).
+   * Called on every ProseMirror transaction.
    *
-   * When a command is in flight (currentTimer set), the state-build sub-phases
-   * and the docDiff comparison are recorded into that command's timer, and the
-   * total time inside this method is recorded as the total phase. The emitted
-   * stateChanged is stamped with the command's id (causedBy) and carries the
-   * accumulated timings. Transactions firing outside a command handler record
-   * nothing and emit no causedBy.
+   * While a command is in flight (currentCommandId set), this does NOT emit.
+   * It only marks state dirty; the command flush (flushPendingState) builds
+   * and emits once after the handler completes, coalescing the command's
+   * multiple transactions (content insert, trailing-node append, selection
+   * settle) into a single state build and a single emit.
+   *
+   * Outside a command (no command id — asynchronous plugin transactions,
+   * external edits), there is no command boundary to coalesce against, so the
+   * state is emitted immediately, exactly as the engine did before coalescing.
    */
   private onTransaction(_transaction: Transaction): void {
     if (!this.editor) {
       return;
     }
 
-    const editor = this.editor;
-    const timer = this.currentTimer;
-    const causedBy = this.currentCommandId;
+    if (this.currentCommandId !== null) {
+      /**
+       * In-command transaction: defer to the post-handler flush. Marking
+       * dirty (rather than emitting) is what collapses N transactions per
+       * command into one emit.
+       */
+      this.stateDirty = true;
+      return;
+    }
 
     /**
-     * Record total onTransaction time when a command timer is present. The
-     * span wraps the entire method body below; we open it here and close it
-     * just before returning. buildStatePayload, given the same timer, records
-     * its own sub-phases inside this span.
+     * Out-of-command transaction: emit immediately with no causedBy and no
+     * command timer, preserving delivery of engine-caused state changes that
+     * happen outside the command path.
+     */
+    this.emitState(this.editor, null, null);
+  }
+
+  /**
+   * Emit the coalesced state for the command currently completing, if any
+   * transaction occurred during it. Called once at the end of handleCommand,
+   * after the handler's synchronous work (and all transactions it dispatched)
+   * has finished, with the command context (id, timer) still intact.
+   *
+   * No-op when no transaction occurred (queries, commands that did not mutate
+   * state), so those commands emit no stateChanged — matching the prior
+   * behavior where a command that produced no transaction produced no event.
+   */
+  private flushPendingState(): void {
+    if (!this.editor || !this.stateDirty) {
+      return;
+    }
+    this.stateDirty = false;
+    this.emitState(this.editor, this.currentCommandId, this.currentTimer);
+  }
+
+  /**
+   * Build the state payload once and emit the appropriate events: always a
+   * stateChanged, plus either contentChanged (if the document changed since
+   * the last emit) or selectionChanged (if not). Optionally stamps causedBy
+   * and records build timings when a command timer is supplied.
+   *
+   * This is the single emission path for both the coalesced in-command flush
+   * and the immediate out-of-command case. Centralizing it means the
+   * content-vs-selection decision, the docDiff bookkeeping, and the event
+   * shapes live in exactly one place regardless of which path triggered the
+   * emit.
+   */
+  private emitState(
+    editor: Editor,
+    causedBy: string | null,
+    timer: PhaseTimer | null
+  ): void {
+    /**
+     * Record total emit time when a command timer is present. The span wraps
+     * the build + diff below; buildStatePayload records its own sub-phases
+     * inside it.
      */
     if (timer) {
       timer.start(Phase.total);
@@ -861,23 +971,19 @@ export class TiptapEngine {
     const statePayload = this.buildStatePayload(editor, timer);
 
     /**
-     * Detect whether the document content changed by comparing the
-     * serialized document JSON. This is cheaper than deep comparison
-     * for typical-sized documents. Timed as the docDiff phase — this is
-     * the second full-document JSON.stringify per transaction (the first
-     * being inside serialization), so its cost is worth isolating.
+     * Detect whether the document content changed by comparing the serialized
+     * document JSON against the last emitted doc. Timed as the docDiff phase.
+     * Because emission is now coalesced per command, this compares the FINAL
+     * settled document for the keystroke against the previous emit — so a
+     * keystroke whose follow-on transactions net a document change (e.g. a
+     * trailing-node append) is correctly classified as a content change, and
+     * one that only moved the selection is classified as selection-only.
      */
     const currentDocJson = timer
       ? timer.measure(Phase.docDiff, () => JSON.stringify(statePayload.doc))
       : JSON.stringify(statePayload.doc);
     const docChanged = currentDocJson !== this.lastDocJson;
 
-    /**
-     * Always emit stateChanged with the full state. This is the primary
-     * event ports use to re-render. Close the total span first so the timing
-     * attached reflects the build + diff work; the send itself is part of the
-     * round-trip the port already measures.
-     */
     if (timer) {
       timer.stop(Phase.total);
     }
@@ -929,13 +1035,13 @@ export class TiptapEngine {
    *
    * When a timer is supplied, the three expensive build steps are recorded
    * as separate phases: serializeDoc (the recursive tree walk), commandStates
-   * (the canExec + isActive sweep over every command), and active (the
-   * combined active-marks/nodes/stored-marks extraction). The commandStates
-   * call is additionally passed the timer so it can split its own cost into
-   * the commandStatesCan and commandStatesActive sub-phases. When no timer is
-   * supplied (getState, init), the steps run untimed. The behavior of each
-   * step is unchanged either way — measure() passes the result through and the
-   * sweep visits the same commands.
+   * (the canExec + isActive sweep), and active (the combined
+   * active-marks/nodes/stored-marks extraction). The commandStates call is
+   * additionally passed the timer so it can split its own cost into the
+   * commandStatesCan and commandStatesActive sub-phases. When no timer is
+   * supplied (getState, init, out-of-command emits), the steps run untimed.
+   * The behavior is unchanged either way — measure() passes the result
+   * through and the sweep visits the same commands.
    */
   private buildStatePayload(
     editor: Editor,
@@ -1007,9 +1113,9 @@ export class TiptapEngine {
    * Closes the handle phase on the current command's timer (the span opened
    * in handleCommand) and attaches the accumulated timings to the response.
    * The handle phase therefore measures from dispatch entry to this point —
-   * for mutating commands it includes the synchronous onTransaction work, so
-   * handle is the engine's total JavaScript-side cost for the command and the
-   * sub-phases on the stateChanged break it down.
+   * the command's execution work. The coalesced state build/emit runs after
+   * this (in flushPendingState) and is attributed to the same timer via its
+   * own sub-phases, which ride out on the subsequent stateChanged.
    */
   private sendResponse(
     id: string,
@@ -1036,9 +1142,15 @@ export class TiptapEngine {
   /**
    * Build the optional timings field spread for a message. Returns an object
    * with a timings key only when the timer exists and recorded at least one
-   * phase, so disabled or empty timers add nothing to the message (and the
-   * field is absent on the wire rather than present-and-empty). Spreading the
-   * result keeps the call sites clean: `...this.timingsField(timer)`.
+   * phase, so an empty timer adds nothing to the message (the field is absent
+   * on the wire rather than present-and-empty). Spreading the result keeps the
+   * call sites clean: `...this.timingsField(timer)`.
+   *
+   * Note: because the handle phase is the only phase recorded by the time
+   * sendResponse runs (the build sub-phases are recorded later, in the flush),
+   * the Response carries handle while the subsequent stateChanged carries the
+   * build breakdown. Both read from the same timer instance, so the two
+   * messages together describe the whole command.
    */
   private timingsField(timer: PhaseTimer | null | undefined): {
     timings?: Timings;
